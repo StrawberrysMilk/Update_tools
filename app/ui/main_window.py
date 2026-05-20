@@ -1,77 +1,169 @@
-"""Main window (skeleton).
+"""Main window – full implementation.
 
 Layout:
-    [ systems list ] | [ detail placeholder ]
-
-Subsequent iterations will fill the detail panel with:
-    - Connections table + 一键打开 buttons
-    - Update methods editor
-    - Update history (台账)
-    - Excel import
+    [ systems list ] | [ TabWidget: 连接条目 | 更新方式 | 更新历史 ]
 """
 from __future__ import annotations
 
 from PySide6 import QtCore, QtWidgets
 
+from ..crypto import decrypt, encrypt
 from ..db import get_conn
+from ..launcher import launch_browser, launch_custom, launch_rdp, launch_ssh
+from .connection_dialog import ConnectionDialog
+from .method_dialog import MethodDialog
+from .record_dialog import RecordDialog
 
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, key: bytes) -> None:
         super().__init__()
-        self.key = key  # held in memory for this session only
+        self.key = key
+        self._current_system_id: int | None = None
         self.setWindowTitle("更新管理工具")
-        self.resize(1100, 700)
+        self.resize(1200, 750)
 
         self._build_toolbar()
         self._build_central()
         self._refresh_systems()
 
-    # ---- UI construction --------------------------------------------------
+    # ==================================================================
+    # UI Construction
+    # ==================================================================
 
     def _build_toolbar(self) -> None:
         tb = self.addToolBar("main")
         tb.setMovable(False)
 
-        act_add = tb.addAction("新增系统")
+        act_add = tb.addAction("+ 新增系统")
         act_add.triggered.connect(self._add_system)
 
-        act_del = tb.addAction("删除系统")
+        act_del = tb.addAction("- 删除系统")
         act_del.triggered.connect(self._delete_system)
 
         tb.addSeparator()
-        # Placeholders, wired up in later iterations.
-        for label in ("导入 Excel", "更新历史", "锁定"):
-            a = tb.addAction(label)
-            a.setEnabled(False)
+
+        act_import = tb.addAction("导入 Excel")
+        act_import.triggered.connect(self._import_excel)
+
+        tb.addSeparator()
+
+        act_lock = tb.addAction("锁定")
+        act_lock.triggered.connect(self._lock)
 
     def _build_central(self) -> None:
         splitter = QtWidgets.QSplitter()
 
+        # Left panel: system list
         self._system_list = QtWidgets.QListWidget()
         self._system_list.currentItemChanged.connect(self._on_system_selected)
         splitter.addWidget(self._system_list)
 
-        self._detail = QtWidgets.QWidget()
-        dl = QtWidgets.QVBoxLayout(self._detail)
-        dl.setContentsMargins(16, 16, 16, 16)
-        self._detail_label = QtWidgets.QLabel(
-            "骨架版本\n\n"
-            "下一步会接入：\n"
-            "  • 连接条目（RDP / SSH / 浏览器 / 自定义）+ 一键打开\n"
-            "  • 更新方式（SSH 命令 / SFTP / 手工 等）\n"
-            "  • 更新历史台账\n"
-            "  • Excel 导入"
-        )
-        self._detail_label.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
-        dl.addWidget(self._detail_label)
-        dl.addStretch(1)
-        splitter.addWidget(self._detail)
+        # Right panel: tabs
+        self._tabs = QtWidgets.QTabWidget()
+        self._build_connections_tab()
+        self._build_methods_tab()
+        self._build_records_tab()
+        splitter.addWidget(self._tabs)
 
-        splitter.setSizes([280, 820])
+        splitter.setSizes([260, 940])
         self.setCentralWidget(splitter)
 
-    # ---- actions ----------------------------------------------------------
+    # ---- Connections Tab -------------------------------------------------
+
+    def _build_connections_tab(self) -> None:
+        w = QtWidgets.QWidget()
+        vl = QtWidgets.QVBoxLayout(w)
+
+        # Toolbar for connections
+        hl = QtWidgets.QHBoxLayout()
+        btn_add = QtWidgets.QPushButton("新增连接")
+        btn_add.clicked.connect(self._add_connection)
+        btn_edit = QtWidgets.QPushButton("编辑")
+        btn_edit.clicked.connect(self._edit_connection)
+        btn_del = QtWidgets.QPushButton("删除")
+        btn_del.clicked.connect(self._delete_connection)
+        btn_open = QtWidgets.QPushButton("一键打开")
+        btn_open.clicked.connect(self._launch_connection)
+        btn_open.setStyleSheet("font-weight:bold; color:#0066cc;")
+        hl.addWidget(btn_add)
+        hl.addWidget(btn_edit)
+        hl.addWidget(btn_del)
+        hl.addStretch()
+        hl.addWidget(btn_open)
+        vl.addLayout(hl)
+
+        # Table
+        self._conn_table = QtWidgets.QTableWidget()
+        self._conn_table.setColumnCount(6)
+        self._conn_table.setHorizontalHeaderLabels(
+            ["标签", "类型", "地址", "端口", "用户名", "备注"]
+        )
+        self._conn_table.horizontalHeader().setStretchLastSection(True)
+        self._conn_table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
+        self._conn_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        self._conn_table.doubleClicked.connect(self._launch_connection)
+        vl.addWidget(self._conn_table)
+
+        self._tabs.addTab(w, "连接条目")
+
+    # ---- Methods Tab -----------------------------------------------------
+
+    def _build_methods_tab(self) -> None:
+        w = QtWidgets.QWidget()
+        vl = QtWidgets.QVBoxLayout(w)
+
+        hl = QtWidgets.QHBoxLayout()
+        btn_add = QtWidgets.QPushButton("新增更新方式")
+        btn_add.clicked.connect(self._add_method)
+        btn_edit = QtWidgets.QPushButton("编辑")
+        btn_edit.clicked.connect(self._edit_method)
+        btn_del = QtWidgets.QPushButton("删除")
+        btn_del.clicked.connect(self._delete_method)
+        hl.addWidget(btn_add)
+        hl.addWidget(btn_edit)
+        hl.addWidget(btn_del)
+        hl.addStretch()
+        vl.addLayout(hl)
+
+        self._method_table = QtWidgets.QTableWidget()
+        self._method_table.setColumnCount(4)
+        self._method_table.setHorizontalHeaderLabels(["名称", "类型", "执行内容", "备注"])
+        self._method_table.horizontalHeader().setStretchLastSection(True)
+        self._method_table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
+        self._method_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        vl.addWidget(self._method_table)
+
+        self._tabs.addTab(w, "更新方式")
+
+    # ---- Records Tab -----------------------------------------------------
+
+    def _build_records_tab(self) -> None:
+        w = QtWidgets.QWidget()
+        vl = QtWidgets.QVBoxLayout(w)
+
+        hl = QtWidgets.QHBoxLayout()
+        btn_add = QtWidgets.QPushButton("记录一次更新")
+        btn_add.clicked.connect(self._add_record)
+        hl.addWidget(btn_add)
+        hl.addStretch()
+        vl.addLayout(hl)
+
+        self._record_table = QtWidgets.QTableWidget()
+        self._record_table.setColumnCount(6)
+        self._record_table.setHorizontalHeaderLabels(
+            ["时间", "版本", "操作人", "状态", "更新方式", "备注"]
+        )
+        self._record_table.horizontalHeader().setStretchLastSection(True)
+        self._record_table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
+        self._record_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        vl.addWidget(self._record_table)
+
+        self._tabs.addTab(w, "更新历史")
+
+    # ==================================================================
+    # System List Actions
+    # ==================================================================
 
     def _refresh_systems(self) -> None:
         self._system_list.clear()
@@ -105,7 +197,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         with get_conn() as c:
             c.execute("DELETE FROM systems WHERE id = ?", (sys_id,))
+        self._current_system_id = None
         self._refresh_systems()
+        self._clear_detail_tables()
 
     def _on_system_selected(
         self,
@@ -113,19 +207,405 @@ class MainWindow(QtWidgets.QMainWindow):
         _previous: QtWidgets.QListWidgetItem | None,
     ) -> None:
         if current is None:
-            self._detail_label.setText("（未选择系统）")
+            self._current_system_id = None
+            self._clear_detail_tables()
             return
-        sys_id = current.data(QtCore.Qt.UserRole)
+        self._current_system_id = current.data(QtCore.Qt.UserRole)
+        self._refresh_connections()
+        self._refresh_methods()
+        self._refresh_records()
+
+    def _clear_detail_tables(self) -> None:
+        self._conn_table.setRowCount(0)
+        self._method_table.setRowCount(0)
+        self._record_table.setRowCount(0)
+
+    # ==================================================================
+    # Connection CRUD + Launch
+    # ==================================================================
+
+    def _refresh_connections(self) -> None:
+        self._conn_table.setRowCount(0)
+        if self._current_system_id is None:
+            return
+        with get_conn() as c:
+            rows = c.execute(
+                "SELECT id, label, type, address, port, username, extra "
+                "FROM connections WHERE system_id = ? ORDER BY sort_order, id",
+                (self._current_system_id,),
+            ).fetchall()
+        self._conn_table.setRowCount(len(rows))
+        type_labels = {"rdp": "RDP", "ssh": "SSH", "browser": "浏览器", "custom": "自定义"}
+        for i, row in enumerate(rows):
+            self._conn_table.setItem(i, 0, QtWidgets.QTableWidgetItem(row["label"] or ""))
+            self._conn_table.setItem(i, 1, QtWidgets.QTableWidgetItem(type_labels.get(row["type"], row["type"])))
+            self._conn_table.setItem(i, 2, QtWidgets.QTableWidgetItem(row["address"] or ""))
+            self._conn_table.setItem(i, 3, QtWidgets.QTableWidgetItem(str(row["port"]) if row["port"] else ""))
+            self._conn_table.setItem(i, 4, QtWidgets.QTableWidgetItem(row["username"] or ""))
+            self._conn_table.setItem(i, 5, QtWidgets.QTableWidgetItem(row["extra"] or ""))
+            # Store ID in first column item
+            self._conn_table.item(i, 0).setData(QtCore.Qt.UserRole, row["id"])
+        self._conn_table.resizeColumnsToContents()
+
+    def _selected_conn_id(self) -> int | None:
+        row = self._conn_table.currentRow()
+        if row < 0:
+            return None
+        item = self._conn_table.item(row, 0)
+        return item.data(QtCore.Qt.UserRole) if item else None
+
+    def _add_connection(self) -> None:
+        if self._current_system_id is None:
+            QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个系统")
+            return
+        dlg = ConnectionDialog(self)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        d = dlg.get_data()
+        pw_enc = encrypt(d["password"], self.key) if d["password"] else ""
+        with get_conn() as c:
+            c.execute(
+                "INSERT INTO connections(system_id, label, type, address, port, username, password_enc, extra) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    self._current_system_id,
+                    d["label"],
+                    d["type"],
+                    d["address"],
+                    d["port"],
+                    d["username"],
+                    pw_enc,
+                    d["extra"],
+                ),
+            )
+        self._refresh_connections()
+
+    def _edit_connection(self) -> None:
+        conn_id = self._selected_conn_id()
+        if conn_id is None:
+            return
         with get_conn() as c:
             row = c.execute(
-                "SELECT name, notes, created_at FROM systems WHERE id = ?",
-                (sys_id,),
+                "SELECT label, type, address, port, username, password_enc, extra "
+                "FROM connections WHERE id = ?",
+                (conn_id,),
             ).fetchone()
         if row is None:
             return
-        self._detail_label.setText(
-            f"系统：{row['name']}\n"
-            f"创建时间：{row['created_at']}\n"
-            f"备注：{row['notes'] or '（无）'}\n\n"
-            "（详情面板将在下一轮迭代填充）"
+        data = {
+            "label": row["label"],
+            "type": row["type"],
+            "address": row["address"],
+            "port": row["port"],
+            "username": row["username"],
+            "password": decrypt(row["password_enc"], self.key) if row["password_enc"] else "",
+            "extra": row["extra"],
+        }
+        dlg = ConnectionDialog(self, data=data)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        d = dlg.get_data()
+        pw_enc = encrypt(d["password"], self.key) if d["password"] else ""
+        with get_conn() as c:
+            c.execute(
+                "UPDATE connections SET label=?, type=?, address=?, port=?, username=?, password_enc=?, extra=? "
+                "WHERE id=?",
+                (d["label"], d["type"], d["address"], d["port"], d["username"], pw_enc, d["extra"], conn_id),
+            )
+        self._refresh_connections()
+
+    def _delete_connection(self) -> None:
+        conn_id = self._selected_conn_id()
+        if conn_id is None:
+            return
+        if (
+            QtWidgets.QMessageBox.question(self, "确认", "删除该连接条目？")
+            != QtWidgets.QMessageBox.Yes
+        ):
+            return
+        with get_conn() as c:
+            c.execute("DELETE FROM connections WHERE id = ?", (conn_id,))
+        self._refresh_connections()
+
+    def _launch_connection(self) -> None:
+        conn_id = self._selected_conn_id()
+        if conn_id is None:
+            QtWidgets.QMessageBox.information(self, "提示", "请先选择一个连接条目")
+            return
+        with get_conn() as c:
+            row = c.execute(
+                "SELECT type, address, port, username, password_enc FROM connections WHERE id = ?",
+                (conn_id,),
+            ).fetchone()
+        if row is None:
+            return
+        conn_type = row["type"]
+        address = row["address"] or ""
+        port = row["port"] or 0
+        username = row["username"] or ""
+        password = decrypt(row["password_enc"], self.key) if row["password_enc"] else ""
+
+        try:
+            if conn_type == "rdp":
+                launch_rdp(address, username, password)
+            elif conn_type == "ssh":
+                launch_ssh(address, port or 22, username)
+            elif conn_type == "browser":
+                launch_browser(address)
+            elif conn_type == "custom":
+                launch_custom(address)
+            else:
+                QtWidgets.QMessageBox.warning(self, "错误", f"未知连接类型: {conn_type}")
+                return
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "启动失败", str(e))
+
+    # ==================================================================
+    # Update Methods CRUD
+    # ==================================================================
+
+    def _refresh_methods(self) -> None:
+        self._method_table.setRowCount(0)
+        if self._current_system_id is None:
+            return
+        with get_conn() as c:
+            rows = c.execute(
+                "SELECT id, name, kind, payload, notes FROM update_methods WHERE system_id = ? ORDER BY id",
+                (self._current_system_id,),
+            ).fetchall()
+        kind_labels = {"ssh_command": "SSH 命令", "sftp_push": "SFTP", "manual_rdp": "手工 RDP", "custom": "自定义"}
+        self._method_table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            self._method_table.setItem(i, 0, QtWidgets.QTableWidgetItem(row["name"]))
+            self._method_table.setItem(i, 1, QtWidgets.QTableWidgetItem(kind_labels.get(row["kind"], row["kind"])))
+            self._method_table.setItem(i, 2, QtWidgets.QTableWidgetItem(row["payload"] or ""))
+            self._method_table.setItem(i, 3, QtWidgets.QTableWidgetItem(row["notes"] or ""))
+            self._method_table.item(i, 0).setData(QtCore.Qt.UserRole, row["id"])
+        self._method_table.resizeColumnsToContents()
+
+    def _selected_method_id(self) -> int | None:
+        row = self._method_table.currentRow()
+        if row < 0:
+            return None
+        item = self._method_table.item(row, 0)
+        return item.data(QtCore.Qt.UserRole) if item else None
+
+    def _add_method(self) -> None:
+        if self._current_system_id is None:
+            QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个系统")
+            return
+        dlg = MethodDialog(self)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        d = dlg.get_data()
+        with get_conn() as c:
+            c.execute(
+                "INSERT INTO update_methods(system_id, name, kind, payload, notes) VALUES(?,?,?,?,?)",
+                (self._current_system_id, d["name"], d["kind"], d["payload"], d["notes"]),
+            )
+        self._refresh_methods()
+
+    def _edit_method(self) -> None:
+        mid = self._selected_method_id()
+        if mid is None:
+            return
+        with get_conn() as c:
+            row = c.execute(
+                "SELECT name, kind, payload, notes FROM update_methods WHERE id = ?", (mid,)
+            ).fetchone()
+        if row is None:
+            return
+        dlg = MethodDialog(self, data=dict(row))
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        d = dlg.get_data()
+        with get_conn() as c:
+            c.execute(
+                "UPDATE update_methods SET name=?, kind=?, payload=?, notes=? WHERE id=?",
+                (d["name"], d["kind"], d["payload"], d["notes"], mid),
+            )
+        self._refresh_methods()
+
+    def _delete_method(self) -> None:
+        mid = self._selected_method_id()
+        if mid is None:
+            return
+        if (
+            QtWidgets.QMessageBox.question(self, "确认", "删除该更新方式？")
+            != QtWidgets.QMessageBox.Yes
+        ):
+            return
+        with get_conn() as c:
+            c.execute("DELETE FROM update_methods WHERE id = ?", (mid,))
+        self._refresh_methods()
+
+    # ==================================================================
+    # Update Records (台账)
+    # ==================================================================
+
+    def _refresh_records(self) -> None:
+        self._record_table.setRowCount(0)
+        if self._current_system_id is None:
+            return
+        with get_conn() as c:
+            rows = c.execute(
+                "SELECT r.created_at, r.version, r.operator, r.status, r.notes, "
+                "       m.name AS method_name "
+                "FROM update_records r "
+                "LEFT JOIN update_methods m ON m.id = r.method_id "
+                "WHERE r.system_id = ? ORDER BY r.created_at DESC",
+                (self._current_system_id,),
+            ).fetchall()
+        self._record_table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            self._record_table.setItem(i, 0, QtWidgets.QTableWidgetItem(row["created_at"] or ""))
+            self._record_table.setItem(i, 1, QtWidgets.QTableWidgetItem(row["version"] or ""))
+            self._record_table.setItem(i, 2, QtWidgets.QTableWidgetItem(row["operator"] or ""))
+            self._record_table.setItem(i, 3, QtWidgets.QTableWidgetItem(row["status"] or ""))
+            self._record_table.setItem(i, 4, QtWidgets.QTableWidgetItem(row["method_name"] or ""))
+            self._record_table.setItem(i, 5, QtWidgets.QTableWidgetItem(row["notes"] or ""))
+        self._record_table.resizeColumnsToContents()
+
+    def _add_record(self) -> None:
+        if self._current_system_id is None:
+            QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个系统")
+            return
+        # Get available methods for this system
+        with get_conn() as c:
+            methods = [
+                (row["id"], row["name"])
+                for row in c.execute(
+                    "SELECT id, name FROM update_methods WHERE system_id = ?",
+                    (self._current_system_id,),
+                ).fetchall()
+            ]
+        dlg = RecordDialog(self, methods=methods)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        d = dlg.get_data()
+        with get_conn() as c:
+            c.execute(
+                "INSERT INTO update_records(system_id, method_id, version, operator, status, notes) "
+                "VALUES(?,?,?,?,?,?)",
+                (
+                    self._current_system_id,
+                    d["method_id"],
+                    d["version"],
+                    d["operator"],
+                    d["status"],
+                    d["notes"],
+                ),
+            )
+        self._refresh_records()
+
+    # ==================================================================
+    # Excel Import
+    # ==================================================================
+
+    def _import_excel(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择 Excel 文件", "", "Excel Files (*.xlsx *.xls)"
         )
+        if not path:
+            return
+        try:
+            from openpyxl import load_workbook
+
+            wb = load_workbook(path, read_only=True, data_only=True)
+            ws = wb.active
+            rows = list(ws.iter_rows(min_row=2, values_only=True))
+            wb.close()
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "导入失败", f"读取文件出错：{e}")
+            return
+
+        imported = 0
+        with get_conn() as c:
+            for row in rows:
+                if not row or not row[0]:
+                    continue
+                # Expected columns: A=系统, B=远程地址, C=浏览器运维地址,
+                # D=运维账号, E=运维密码, F=远程账号, G=远程密码, H=系统账号, I=系统密码
+                system_name = str(row[0]).strip() if row[0] else ""
+                if not system_name:
+                    continue
+
+                # Find or create system
+                existing = c.execute(
+                    "SELECT id FROM systems WHERE name = ?", (system_name,)
+                ).fetchone()
+                if existing:
+                    sys_id = existing["id"]
+                else:
+                    c.execute("INSERT INTO systems(name) VALUES(?)", (system_name,))
+                    sys_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+                remote_addr = str(row[1]).strip() if len(row) > 1 and row[1] else ""
+                browser_addr = str(row[2]).strip() if len(row) > 2 and row[2] else ""
+                ops_user = str(row[3]).strip() if len(row) > 3 and row[3] else ""
+                ops_pass = str(row[4]).strip() if len(row) > 4 and row[4] else ""
+                remote_user = str(row[5]).strip() if len(row) > 5 and row[5] else ""
+                remote_pass = str(row[6]).strip() if len(row) > 6 and row[6] else ""
+                sys_user = str(row[7]).strip() if len(row) > 7 and row[7] else ""
+                sys_pass = str(row[8]).strip() if len(row) > 8 and row[8] else ""
+
+                # Add RDP connection if remote address exists
+                if remote_addr:
+                    c.execute(
+                        "INSERT INTO connections(system_id, label, type, address, username, password_enc) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (
+                            sys_id,
+                            "远程桌面",
+                            "rdp",
+                            remote_addr,
+                            remote_user,
+                            encrypt(remote_pass, self.key) if remote_pass else "",
+                        ),
+                    )
+
+                # Add browser connection if URL exists
+                if browser_addr:
+                    c.execute(
+                        "INSERT INTO connections(system_id, label, type, address, username, password_enc) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (
+                            sys_id,
+                            "运维地址",
+                            "browser",
+                            browser_addr,
+                            ops_user,
+                            encrypt(ops_pass, self.key) if ops_pass else "",
+                        ),
+                    )
+
+                # Add system account as an SSH connection if system user exists
+                if sys_user:
+                    c.execute(
+                        "INSERT INTO connections(system_id, label, type, address, username, password_enc) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (
+                            sys_id,
+                            "系统账号",
+                            "ssh",
+                            remote_addr,
+                            sys_user,
+                            encrypt(sys_pass, self.key) if sys_pass else "",
+                        ),
+                    )
+
+                imported += 1
+
+        self._refresh_systems()
+        QtWidgets.QMessageBox.information(
+            self, "导入完成", f"成功处理 {imported} 行数据。"
+        )
+
+    # ==================================================================
+    # Lock
+    # ==================================================================
+
+    def _lock(self) -> None:
+        """Clear key from memory and close — user must re-enter password."""
+        self.key = b"\x00" * 32  # overwrite
+        self.close()
