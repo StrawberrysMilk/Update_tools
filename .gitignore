@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Build
+build/
+dist/
+*.spec
+
+# Local data (must NEVER be committed)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+meta.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
