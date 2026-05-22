@@ -9,7 +9,7 @@ env/
 # Build
 build/
 dist/
-*.spec
+dist2/
 
 # Local data (must NEVER be committed)
 *.db
@@ -17,6 +17,7 @@ dist/
 *.db-wal
 *.db-shm
 meta.json
+账号密码本.xls
 
 # IDE
 .vscode/

@@ -508,87 +508,155 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not path:
             return
-        try:
-            from openpyxl import load_workbook
 
-            wb = load_workbook(path, read_only=True, data_only=True)
-            ws = wb.active
-            rows = list(ws.iter_rows(min_row=2, values_only=True))
-            wb.close()
+        # --- Read rows from .xls or .xlsx ---
+        try:
+            rows: list[list] = []
+            if path.lower().endswith(".xls"):
+                import xlrd
+
+                book = xlrd.open_workbook(path)
+                sh = book.sheet_by_index(0)
+                for r in range(sh.nrows):
+                    rows.append([sh.cell_value(r, c) for c in range(sh.ncols)])
+            else:
+                from openpyxl import load_workbook
+
+                wb = load_workbook(path, read_only=True, data_only=True)
+                ws = wb.active
+                for row in ws.iter_rows(values_only=True):
+                    rows.append(list(row))
+                wb.close()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "导入失败", f"读取文件出错：{e}")
             return
 
+        if len(rows) < 2:
+            QtWidgets.QMessageBox.warning(self, "导入失败", "文件中没有数据行。")
+            return
+
+        # --- Parse rows ---
+        # Header: 系统 | 远程地址 | 浏览器运维地址 | 运维账号 | 运维密码 | 远程账号 | 远程密码 | 系统账号 | 系统密码
+        # "系统" column only appears on the first row of each system group;
+        # subsequent rows with empty col-0 belong to the same system.
         imported = 0
+        current_sys_id: int | None = None
+        current_sys_name: str = ""
+
+        def _cell(row: list, idx: int) -> str:
+            if idx >= len(row) or row[idx] is None:
+                return ""
+            v = row[idx]
+            if isinstance(v, float) and v == int(v):
+                return str(int(v))
+            return str(v).strip()
+
+        def _looks_like_address(s: str) -> bool:
+            """Heuristic: contains a dot or colon (IP/port), or starts with http."""
+            if not s:
+                return False
+            return ("." in s or ":" in s or s.startswith("http"))
+
         with get_conn() as c:
-            for row in rows:
-                if not row or not row[0]:
+            for row in rows[1:]:  # skip header
+                system_name = _cell(row, 0)
+                remote_addr = _cell(row, 1)
+                browser_addr = _cell(row, 2)
+                ops_user = _cell(row, 3)
+                ops_pass = _cell(row, 4)
+                remote_user = _cell(row, 5)
+                remote_pass = _cell(row, 6)
+                sys_user = _cell(row, 7)
+                sys_pass = _cell(row, 8)
+
+                # New system group
+                if system_name:
+                    current_sys_name = system_name
+                    existing = c.execute(
+                        "SELECT id FROM systems WHERE name = ?", (current_sys_name,)
+                    ).fetchone()
+                    if existing:
+                        current_sys_id = existing["id"]
+                    else:
+                        c.execute("INSERT INTO systems(name) VALUES(?)", (current_sys_name,))
+                        current_sys_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+                if current_sys_id is None:
                     continue
-                # Expected columns: A=系统, B=远程地址, C=浏览器运维地址,
-                # D=运维账号, E=运维密码, F=远程账号, G=远程密码, H=系统账号, I=系统密码
-                system_name = str(row[0]).strip() if row[0] else ""
-                if not system_name:
+
+                # Skip sub-header rows (no real address data)
+                if not _looks_like_address(remote_addr) and not _looks_like_address(browser_addr):
+                    # Still count the system creation row
+                    if system_name:
+                        imported += 1
                     continue
 
-                # Find or create system
-                existing = c.execute(
-                    "SELECT id FROM systems WHERE name = ?", (system_name,)
-                ).fetchone()
-                if existing:
-                    sys_id = existing["id"]
-                else:
-                    c.execute("INSERT INTO systems(name) VALUES(?)", (system_name,))
-                    sys_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+                # Parse address:port for remote connections
+                addr_part = remote_addr
+                port_part: int | None = None
+                if remote_addr and ":" in remote_addr and not remote_addr.startswith("http"):
+                    parts = remote_addr.rsplit(":", 1)
+                    try:
+                        port_part = int(parts[1])
+                        addr_part = parts[0]
+                    except ValueError:
+                        pass
 
-                remote_addr = str(row[1]).strip() if len(row) > 1 and row[1] else ""
-                browser_addr = str(row[2]).strip() if len(row) > 2 and row[2] else ""
-                ops_user = str(row[3]).strip() if len(row) > 3 and row[3] else ""
-                ops_pass = str(row[4]).strip() if len(row) > 4 and row[4] else ""
-                remote_user = str(row[5]).strip() if len(row) > 5 and row[5] else ""
-                remote_pass = str(row[6]).strip() if len(row) > 6 and row[6] else ""
-                sys_user = str(row[7]).strip() if len(row) > 7 and row[7] else ""
-                sys_pass = str(row[8]).strip() if len(row) > 8 and row[8] else ""
+                # Determine connection type
+                if remote_addr and _looks_like_address(remote_addr):
+                    # Guess type: if port looks like SSH (22) -> ssh, else rdp
+                    if port_part and port_part == 22:
+                        conn_type = "ssh"
+                        label = "SSH"
+                    elif remote_addr.startswith("http"):
+                        conn_type = "browser"
+                        label = "浏览器"
+                    else:
+                        conn_type = "rdp"
+                        label = "远程桌面"
 
-                # Add RDP connection if remote address exists
-                if remote_addr:
                     c.execute(
-                        "INSERT INTO connections(system_id, label, type, address, username, password_enc) "
-                        "VALUES(?,?,?,?,?,?)",
+                        "INSERT INTO connections(system_id, label, type, address, port, username, password_enc, extra) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
                         (
-                            sys_id,
-                            "远程桌面",
-                            "rdp",
-                            remote_addr,
+                            current_sys_id,
+                            label,
+                            conn_type,
+                            addr_part,
+                            port_part,
                             remote_user,
                             encrypt(remote_pass, self.key) if remote_pass else "",
+                            f"系统账号: {sys_user}" if sys_user else "",
                         ),
                     )
 
-                # Add browser connection if URL exists
-                if browser_addr:
+                # Browser/运维 address
+                if browser_addr and _looks_like_address(browser_addr):
                     c.execute(
-                        "INSERT INTO connections(system_id, label, type, address, username, password_enc) "
-                        "VALUES(?,?,?,?,?,?)",
+                        "INSERT INTO connections(system_id, label, type, address, port, username, password_enc) "
+                        "VALUES(?,?,?,?,?,?,?)",
                         (
-                            sys_id,
+                            current_sys_id,
                             "运维地址",
                             "browser",
                             browser_addr,
+                            None,
                             ops_user,
                             encrypt(ops_pass, self.key) if ops_pass else "",
                         ),
                     )
 
-                # Add system account as an SSH connection if system user exists
-                if sys_user:
+                # System account as separate SSH entry if different from remote_user
+                if sys_user and sys_user != remote_user and _looks_like_address(remote_addr):
                     c.execute(
-                        "INSERT INTO connections(system_id, label, type, address, username, password_enc) "
-                        "VALUES(?,?,?,?,?,?)",
+                        "INSERT INTO connections(system_id, label, type, address, port, username, password_enc) "
+                        "VALUES(?,?,?,?,?,?,?)",
                         (
-                            sys_id,
+                            current_sys_id,
                             "系统账号",
                             "ssh",
-                            remote_addr,
+                            addr_part,
+                            port_part if port_part else 22,
                             sys_user,
                             encrypt(sys_pass, self.key) if sys_pass else "",
                         ),
@@ -598,7 +666,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._refresh_systems()
         QtWidgets.QMessageBox.information(
-            self, "导入完成", f"成功处理 {imported} 行数据。"
+            self, "导入完成", f"成功导入 {imported} 条记录。"
         )
 
     # ==================================================================
