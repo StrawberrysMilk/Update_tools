@@ -41,21 +41,52 @@ def launch_ssh(address: str, port: int = 22, username: str | None = None) -> Non
     """Open an SSH session in a new terminal window."""
     target = f"{username}@{address}" if username else address
     ssh_cmd = f"ssh -p {port} {shlex.quote(target)}"
+    _open_in_terminal(ssh_cmd)
+
+
+def launch_ssh_command(
+    address: str,
+    port: int,
+    username: str | None,
+    command: str,
+) -> None:
+    """Open a terminal that runs a single command over SSH and stays open.
+
+    The terminal window is kept open after the command finishes so the
+    user can review output (and optionally trigger a re-run).
+    """
+    if not command.strip():
+        raise ValueError("命令为空")
+    target = f"{username}@{address}" if username else address
+    # Quote the remote command so the local shell does not split it.
+    quoted_remote = command.replace('"', '\\"')
+    ssh_cmd = f'ssh -p {port} {shlex.quote(target)} "{quoted_remote}"'
+    _open_in_terminal(ssh_cmd, keep_open=True)
+
+
+def _open_in_terminal(cmd_line: str, keep_open: bool = True) -> None:
+    """Open ``cmd_line`` in a new terminal window cross-platform."""
     if _is_windows():
-        # Open a new cmd window that runs ssh (kept open after exit).
+        # /k keeps the window open; /c closes after exit.
+        flag = "/k" if keep_open else "/c"
         subprocess.Popen(
-            ["cmd", "/c", "start", "cmd", "/k", ssh_cmd],
+            ["cmd", "/c", "start", "cmd", flag, cmd_line],
             shell=False,
         )
+        return
+    # Linux / macOS best effort.
+    if keep_open:
+        # Append a `; echo; read -p ...` so the user can read output.
+        wrapped = f'{cmd_line}; echo; read -p "Press Enter to close..." _'
     else:
-        # Best-effort terminal emulator on Linux/macOS.
-        for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
-            try:
-                subprocess.Popen([term, "-e", ssh_cmd])
-                return
-            except FileNotFoundError:
-                continue
-        raise RuntimeError("未找到可用的终端模拟器")
+        wrapped = cmd_line
+    for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
+        try:
+            subprocess.Popen([term, "-e", "bash", "-c", wrapped])
+            return
+        except FileNotFoundError:
+            continue
+    raise RuntimeError("未找到可用的终端模拟器")
 
 
 def launch_browser(url: str) -> None:

@@ -9,12 +9,16 @@ import sys
 from PySide6 import QtWidgets
 
 from app.db import init_schema
+from app.style import STYLESHEET
 from app.ui.main_window import MainWindow
 from app.ui.unlock import UnlockDialog
 
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
+    app.setStyleSheet(STYLESHEET)
+    app.setApplicationName("更新管理工具")
+
     init_schema()
 
     unlock = UnlockDialog()

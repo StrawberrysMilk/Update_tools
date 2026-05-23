@@ -9,7 +9,14 @@ from PySide6 import QtCore, QtWidgets
 
 from ..crypto import decrypt, encrypt
 from ..db import get_conn
-from ..launcher import launch_browser, launch_custom, launch_rdp, launch_ssh
+from ..launcher import (
+    launch_browser,
+    launch_custom,
+    launch_rdp,
+    launch_ssh,
+    launch_ssh_command,
+)
+import json
 from .connection_dialog import ConnectionDialog
 from .method_dialog import MethodDialog
 from .record_dialog import RecordDialog
@@ -21,11 +28,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.key = key
         self._current_system_id: int | None = None
         self.setWindowTitle("更新管理工具")
-        self.resize(1200, 750)
+        self.resize(1280, 800)
 
         self._build_toolbar()
         self._build_central()
+        self._build_statusbar()
         self._refresh_systems()
+
+    def _build_statusbar(self) -> None:
+        sb = self.statusBar()
+        sb.setStyleSheet("background:#f5f7fa; color:#666; padding:4px;")
+        sb.showMessage("就绪 · 数据已加密存储")
 
     # ==================================================================
     # UI Construction
@@ -54,20 +67,45 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_central(self) -> None:
         splitter = QtWidgets.QSplitter()
 
-        # Left panel: system list
+        # Left panel: search + system list
+        left = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_layout.setSpacing(6)
+
+        self._search = QtWidgets.QLineEdit()
+        self._search.setPlaceholderText("🔍 搜索系统...")
+        self._search.textChanged.connect(self._filter_systems)
+        left_layout.addWidget(self._search)
+
         self._system_list = QtWidgets.QListWidget()
         self._system_list.currentItemChanged.connect(self._on_system_selected)
-        splitter.addWidget(self._system_list)
+        left_layout.addWidget(self._system_list)
 
-        # Right panel: tabs
+        splitter.addWidget(left)
+
+        # Right panel: tabs (with margins)
+        right = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right)
+        right_layout.setContentsMargins(8, 8, 8, 8)
+
         self._tabs = QtWidgets.QTabWidget()
         self._build_connections_tab()
         self._build_methods_tab()
         self._build_records_tab()
-        splitter.addWidget(self._tabs)
+        right_layout.addWidget(self._tabs)
 
-        splitter.setSizes([260, 940])
+        splitter.addWidget(right)
+
+        splitter.setSizes([280, 1000])
         self.setCentralWidget(splitter)
+
+    def _filter_systems(self, text: str) -> None:
+        """Hide list items not matching the search text."""
+        text = text.lower().strip()
+        for i in range(self._system_list.count()):
+            item = self._system_list.item(i)
+            item.setHidden(text not in item.text().lower() if text else False)
 
     # ---- Connections Tab -------------------------------------------------
 
@@ -120,10 +158,14 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_edit.clicked.connect(self._edit_method)
         btn_del = QtWidgets.QPushButton("删除")
         btn_del.clicked.connect(self._delete_method)
+        btn_exec = QtWidgets.QPushButton("▶ 执行")
+        btn_exec.clicked.connect(self._execute_method)
+        btn_exec.setStyleSheet("font-weight:bold; color:#cc6600;")
         hl.addWidget(btn_add)
         hl.addWidget(btn_edit)
         hl.addWidget(btn_del)
         hl.addStretch()
+        hl.addWidget(btn_exec)
         vl.addLayout(hl)
 
         self._method_table = QtWidgets.QTableWidget()
@@ -438,6 +480,159 @@ class MainWindow(QtWidgets.QMainWindow):
         with get_conn() as c:
             c.execute("DELETE FROM update_methods WHERE id = ?", (mid,))
         self._refresh_methods()
+
+    def _execute_method(self) -> None:
+        """Execute the selected update method and optionally log to ledger."""
+        mid = self._selected_method_id()
+        if mid is None:
+            QtWidgets.QMessageBox.information(self, "提示", "请先选择一个更新方式")
+            return
+        with get_conn() as c:
+            row = c.execute(
+                "SELECT name, kind, payload, notes FROM update_methods WHERE id = ?", (mid,)
+            ).fetchone()
+        if row is None:
+            return
+
+        kind = row["kind"]
+        payload = row["payload"] or ""
+        method_name = row["name"]
+
+        try:
+            if kind == "ssh_command":
+                # Need an SSH connection for this system to get host/port/user
+                self._exec_ssh_method(payload)
+            elif kind == "sftp_push":
+                # SFTP: open terminal with scp/sftp command
+                self._exec_sftp_method(payload)
+            elif kind == "manual_rdp":
+                # Just open RDP for the first RDP connection of this system
+                self._exec_manual_rdp_method()
+            elif kind == "custom":
+                launch_custom(payload)
+            else:
+                QtWidgets.QMessageBox.warning(self, "错误", f"未知更新方式类型: {kind}")
+                return
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "执行失败", str(e))
+            return
+
+        # Prompt user to record this update in the ledger
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "记录更新",
+            f"已触发「{method_name}」。\n是否立即记录到更新历史台账？",
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            with get_conn() as c:
+                methods = [
+                    (r["id"], r["name"])
+                    for r in c.execute(
+                        "SELECT id, name FROM update_methods WHERE system_id = ?",
+                        (self._current_system_id,),
+                    ).fetchall()
+                ]
+            dlg = RecordDialog(self, methods=methods)
+            # Pre-select the method we just executed
+            for i in range(dlg._method_combo.count()):
+                if dlg._method_combo.itemData(i) == mid:
+                    dlg._method_combo.setCurrentIndex(i)
+                    break
+            if dlg.exec() == QtWidgets.QDialog.Accepted:
+                d = dlg.get_data()
+                with get_conn() as c:
+                    c.execute(
+                        "INSERT INTO update_records(system_id, method_id, version, operator, status, notes) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (
+                            self._current_system_id,
+                            d["method_id"],
+                            d["version"],
+                            d["operator"],
+                            d["status"],
+                            d["notes"],
+                        ),
+                    )
+                self._refresh_records()
+
+    def _exec_ssh_method(self, payload: str) -> None:
+        """Execute an SSH command method using the first SSH connection of the system."""
+        # Parse payload: can be plain command or JSON {"cmd": "..."}
+        cmd = payload.strip()
+        if cmd.startswith("{"):
+            try:
+                data = json.loads(cmd)
+                cmd = data.get("cmd", cmd)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Find SSH connection for this system
+        with get_conn() as c:
+            conn_row = c.execute(
+                "SELECT address, port, username, password_enc FROM connections "
+                "WHERE system_id = ? AND type = 'ssh' ORDER BY sort_order, id LIMIT 1",
+                (self._current_system_id,),
+            ).fetchone()
+        if conn_row is None:
+            raise RuntimeError(
+                "该系统没有配置 SSH 连接条目，请先在「连接条目」中添加一个 SSH 类型的连接。"
+            )
+        address = conn_row["address"] or ""
+        port = conn_row["port"] or 22
+        username = conn_row["username"] or ""
+        launch_ssh_command(address, port, username, cmd)
+
+    def _exec_sftp_method(self, payload: str) -> None:
+        """Execute an SFTP push method — opens terminal with sftp/scp command."""
+        # Parse payload: JSON {"local": "...", "remote": "..."} or plain sftp command
+        local_path = ""
+        remote_path = ""
+        if payload.strip().startswith("{"):
+            try:
+                data = json.loads(payload)
+                local_path = data.get("local", "")
+                remote_path = data.get("remote", "")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Find SSH connection
+        with get_conn() as c:
+            conn_row = c.execute(
+                "SELECT address, port, username FROM connections "
+                "WHERE system_id = ? AND type = 'ssh' ORDER BY sort_order, id LIMIT 1",
+                (self._current_system_id,),
+            ).fetchone()
+        if conn_row is None:
+            raise RuntimeError("该系统没有配置 SSH 连接条目，无法进行 SFTP 推送。")
+
+        address = conn_row["address"] or ""
+        port = conn_row["port"] or 22
+        username = conn_row["username"] or ""
+        target = f"{username}@{address}" if username else address
+
+        if local_path and remote_path:
+            cmd = f'scp -P {port} "{local_path}" {target}:"{remote_path}"'
+        else:
+            # Fallback: just open an sftp session
+            cmd = f"sftp -P {port} {target}"
+
+        from ..launcher import _open_in_terminal
+        _open_in_terminal(cmd, keep_open=True)
+
+    def _exec_manual_rdp_method(self) -> None:
+        """Open the first RDP connection of this system."""
+        with get_conn() as c:
+            conn_row = c.execute(
+                "SELECT address, username, password_enc FROM connections "
+                "WHERE system_id = ? AND type = 'rdp' ORDER BY sort_order, id LIMIT 1",
+                (self._current_system_id,),
+            ).fetchone()
+        if conn_row is None:
+            raise RuntimeError("该系统没有配置 RDP 连接条目。")
+        address = conn_row["address"] or ""
+        username = conn_row["username"] or ""
+        password = decrypt(conn_row["password_enc"], self.key) if conn_row["password_enc"] else ""
+        launch_rdp(address, username, password)
 
     # ==================================================================
     # Update Records (台账)
