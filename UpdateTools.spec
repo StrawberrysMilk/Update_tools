@@ -3,11 +3,13 @@
 import shutil
 import os
 
-# 每次打包前清理 dist2 目录
-dist_path = os.path.join(os.path.dirname(os.path.abspath(SPECPATH)), 'dist2')
-if os.path.exists(dist_path):
-    shutil.rmtree(dist_path)
-    print(f'已清理: {dist_path}')
+# 每次打包前清理 dist 和 build 目录
+base_dir = os.path.dirname(os.path.abspath(SPECPATH))
+for folder in ('dist', 'build'):
+    folder_path = os.path.join(base_dir, folder)
+    if os.path.exists(folder_path):
+        shutil.rmtree(folder_path)
+        print(f'已清理: {folder_path}')
 
 a = Analysis(
     ['main.py'],

@@ -5,7 +5,7 @@ Layout:
 """
 from __future__ import annotations
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..crypto import decrypt, encrypt
 from ..db import get_conn
@@ -13,6 +13,11 @@ from ..launcher import launch_browser, launch_custom, launch_rdp, launch_ssh
 from .connection_dialog import ConnectionDialog
 from .method_dialog import MethodDialog
 from .record_dialog import RecordDialog
+from .style import (
+    ACCENT, BG_BASE, BG_ELEVATED, BG_SURFACE, BORDER,
+    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_DISABLED,
+    RADIUS_SM,
+)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -34,11 +39,26 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_toolbar(self) -> None:
         tb = self.addToolBar("main")
         tb.setMovable(False)
+        tb.setIconSize(QtCore.QSize(16, 16))
 
-        act_add = tb.addAction("+ 新增系统")
+        # App title in toolbar
+        title_label = QtWidgets.QLabel("  UpdateTools")
+        title_label.setStyleSheet(f"""
+            font-size: 14px;
+            font-weight: 600;
+            color: {TEXT_PRIMARY};
+            padding: 0 8px 0 4px;
+        """)
+        title_action = QtWidgets.QWidgetAction(tb)
+        title_action.setDefaultWidget(title_label)
+        tb.addAction(title_action)
+
+        tb.addSeparator()
+
+        act_add = tb.addAction("新增系统")
         act_add.triggered.connect(self._add_system)
 
-        act_del = tb.addAction("- 删除系统")
+        act_del = tb.addAction("删除系统")
         act_del.triggered.connect(self._delete_system)
 
         tb.addSeparator()
@@ -46,18 +66,51 @@ class MainWindow(QtWidgets.QMainWindow):
         act_import = tb.addAction("导入 Excel")
         act_import.triggered.connect(self._import_excel)
 
-        tb.addSeparator()
+        # Spacer
+        spacer = QtWidgets.QWidget()
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        spacer_action = QtWidgets.QWidgetAction(tb)
+        spacer_action.setDefaultWidget(spacer)
+        tb.addAction(spacer_action)
 
         act_lock = tb.addAction("锁定")
         act_lock.triggered.connect(self._lock)
 
     def _build_central(self) -> None:
         splitter = QtWidgets.QSplitter()
+        splitter.setHandleWidth(1)
 
-        # Left panel: system list
+        # Left panel: system list with header
+        left_panel = QtWidgets.QWidget()
+        left_panel.setStyleSheet(f"""
+            QWidget {{
+                background-color: {BG_SURFACE};
+                border-right: 1px solid {BORDER};
+            }}
+        """)
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+
+        # Header for sidebar
+        sidebar_header = QtWidgets.QLabel("  系统列表")
+        sidebar_header.setFixedHeight(42)
+        sidebar_header.setStyleSheet(f"""
+            font-size: 11px;
+            font-weight: 600;
+            color: {TEXT_DISABLED};
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            padding: 0 16px;
+            border-bottom: 1px solid {BORDER};
+        """)
+        left_layout.addWidget(sidebar_header)
+
         self._system_list = QtWidgets.QListWidget()
         self._system_list.currentItemChanged.connect(self._on_system_selected)
-        splitter.addWidget(self._system_list)
+        left_layout.addWidget(self._system_list)
+
+        splitter.addWidget(left_panel)
 
         # Right panel: tabs
         self._tabs = QtWidgets.QTabWidget()
@@ -66,7 +119,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_records_tab()
         splitter.addWidget(self._tabs)
 
-        splitter.setSizes([260, 940])
+        splitter.setSizes([240, 960])
         self.setCentralWidget(splitter)
 
     # ---- Connections Tab -------------------------------------------------
@@ -74,22 +127,30 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_connections_tab(self) -> None:
         w = QtWidgets.QWidget()
         vl = QtWidgets.QVBoxLayout(w)
+        vl.setContentsMargins(16, 16, 16, 16)
+        vl.setSpacing(12)
 
-        # Toolbar for connections
+        # Toolbar
         hl = QtWidgets.QHBoxLayout()
-        btn_add = QtWidgets.QPushButton("新增连接")
+        hl.setSpacing(8)
+
+        btn_add = QtWidgets.QPushButton("新增")
         btn_add.clicked.connect(self._add_connection)
         btn_edit = QtWidgets.QPushButton("编辑")
         btn_edit.clicked.connect(self._edit_connection)
         btn_del = QtWidgets.QPushButton("删除")
+        btn_del.setObjectName("btn_ghost")
         btn_del.clicked.connect(self._delete_connection)
-        btn_open = QtWidgets.QPushButton("一键打开")
-        btn_open.clicked.connect(self._launch_connection)
-        btn_open.setStyleSheet("font-weight:bold; color:#0066cc;")
+
         hl.addWidget(btn_add)
         hl.addWidget(btn_edit)
         hl.addWidget(btn_del)
         hl.addStretch()
+
+        btn_open = QtWidgets.QPushButton("打开")
+        btn_open.setObjectName("btn_primary")
+        btn_open.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        btn_open.clicked.connect(self._launch_connection)
         hl.addWidget(btn_open)
         vl.addLayout(hl)
 
@@ -102,24 +163,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self._conn_table.horizontalHeader().setStretchLastSection(True)
         self._conn_table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
         self._conn_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        self._conn_table.verticalHeader().setVisible(False)
         self._conn_table.doubleClicked.connect(self._launch_connection)
         vl.addWidget(self._conn_table)
 
-        self._tabs.addTab(w, "连接条目")
+        self._tabs.addTab(w, "  连接条目  ")
 
     # ---- Methods Tab -----------------------------------------------------
 
     def _build_methods_tab(self) -> None:
         w = QtWidgets.QWidget()
         vl = QtWidgets.QVBoxLayout(w)
+        vl.setContentsMargins(16, 16, 16, 16)
+        vl.setSpacing(12)
 
         hl = QtWidgets.QHBoxLayout()
-        btn_add = QtWidgets.QPushButton("新增更新方式")
+        hl.setSpacing(8)
+
+        btn_add = QtWidgets.QPushButton("新增")
         btn_add.clicked.connect(self._add_method)
         btn_edit = QtWidgets.QPushButton("编辑")
         btn_edit.clicked.connect(self._edit_method)
         btn_del = QtWidgets.QPushButton("删除")
+        btn_del.setObjectName("btn_ghost")
         btn_del.clicked.connect(self._delete_method)
+
         hl.addWidget(btn_add)
         hl.addWidget(btn_edit)
         hl.addWidget(btn_del)
@@ -132,18 +200,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._method_table.horizontalHeader().setStretchLastSection(True)
         self._method_table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
         self._method_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        self._method_table.verticalHeader().setVisible(False)
         vl.addWidget(self._method_table)
 
-        self._tabs.addTab(w, "更新方式")
+        self._tabs.addTab(w, "  更新方式  ")
 
     # ---- Records Tab -----------------------------------------------------
 
     def _build_records_tab(self) -> None:
         w = QtWidgets.QWidget()
         vl = QtWidgets.QVBoxLayout(w)
+        vl.setContentsMargins(16, 16, 16, 16)
+        vl.setSpacing(12)
 
         hl = QtWidgets.QHBoxLayout()
-        btn_add = QtWidgets.QPushButton("记录一次更新")
+        btn_add = QtWidgets.QPushButton("记录更新")
+        btn_add.setObjectName("btn_primary")
+        btn_add.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
         btn_add.clicked.connect(self._add_record)
         hl.addWidget(btn_add)
         hl.addStretch()
@@ -157,9 +230,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._record_table.horizontalHeader().setStretchLastSection(True)
         self._record_table.setSelectionBehavior(QtWidgets.QTableWidget.SelectRows)
         self._record_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
+        self._record_table.verticalHeader().setVisible(False)
         vl.addWidget(self._record_table)
 
-        self._tabs.addTab(w, "更新历史")
+        self._tabs.addTab(w, "  更新历史  ")
 
     # ==================================================================
     # System List Actions
@@ -243,7 +317,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._conn_table.setItem(i, 3, QtWidgets.QTableWidgetItem(str(row["port"]) if row["port"] else ""))
             self._conn_table.setItem(i, 4, QtWidgets.QTableWidgetItem(row["username"] or ""))
             self._conn_table.setItem(i, 5, QtWidgets.QTableWidgetItem(row["extra"] or ""))
-            # Store ID in first column item
             self._conn_table.item(i, 0).setData(QtCore.Qt.UserRole, row["id"])
         self._conn_table.resizeColumnsToContents()
 
@@ -470,7 +543,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._current_system_id is None:
             QtWidgets.QMessageBox.information(self, "提示", "请先在左侧选择一个系统")
             return
-        # Get available methods for this system
         with get_conn() as c:
             methods = [
                 (row["id"], row["name"])
@@ -509,19 +581,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path:
             return
 
-        # --- Read rows from .xls or .xlsx ---
         try:
             rows: list[list] = []
             if path.lower().endswith(".xls"):
                 import xlrd
-
                 book = xlrd.open_workbook(path)
                 sh = book.sheet_by_index(0)
                 for r in range(sh.nrows):
                     rows.append([sh.cell_value(r, c) for c in range(sh.ncols)])
             else:
                 from openpyxl import load_workbook
-
                 wb = load_workbook(path, read_only=True, data_only=True)
                 ws = wb.active
                 for row in ws.iter_rows(values_only=True):
@@ -535,10 +604,6 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "导入失败", "文件中没有数据行。")
             return
 
-        # --- Parse rows ---
-        # Header: 系统 | 远程地址 | 浏览器运维地址 | 运维账号 | 运维密码 | 远程账号 | 远程密码 | 系统账号 | 系统密码
-        # "系统" column only appears on the first row of each system group;
-        # subsequent rows with empty col-0 belong to the same system.
         imported = 0
         current_sys_id: int | None = None
         current_sys_name: str = ""
@@ -552,13 +617,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return str(v).strip()
 
         def _looks_like_address(s: str) -> bool:
-            """Heuristic: contains a dot or colon (IP/port), or starts with http."""
             if not s:
                 return False
             return ("." in s or ":" in s or s.startswith("http"))
 
         with get_conn() as c:
-            for row in rows[1:]:  # skip header
+            for row in rows[1:]:
                 system_name = _cell(row, 0)
                 remote_addr = _cell(row, 1)
                 browser_addr = _cell(row, 2)
@@ -569,7 +633,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 sys_user = _cell(row, 7)
                 sys_pass = _cell(row, 8)
 
-                # New system group
                 if system_name:
                     current_sys_name = system_name
                     existing = c.execute(
@@ -584,14 +647,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 if current_sys_id is None:
                     continue
 
-                # Skip sub-header rows (no real address data)
                 if not _looks_like_address(remote_addr) and not _looks_like_address(browser_addr):
-                    # Still count the system creation row
                     if system_name:
                         imported += 1
                     continue
 
-                # Parse address:port for remote connections
                 addr_part = remote_addr
                 port_part: int | None = None
                 if remote_addr and ":" in remote_addr and not remote_addr.startswith("http"):
@@ -602,9 +662,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     except ValueError:
                         pass
 
-                # Determine connection type
                 if remote_addr and _looks_like_address(remote_addr):
-                    # Guess type: if port looks like SSH (22) -> ssh, else rdp
                     if port_part and port_part == 22:
                         conn_type = "ssh"
                         label = "SSH"
@@ -630,7 +688,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         ),
                     )
 
-                # Browser/运维 address
                 if browser_addr and _looks_like_address(browser_addr):
                     c.execute(
                         "INSERT INTO connections(system_id, label, type, address, port, username, password_enc) "
@@ -646,7 +703,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         ),
                     )
 
-                # System account as separate SSH entry if different from remote_user
                 if sys_user and sys_user != remote_user and _looks_like_address(remote_addr):
                     c.execute(
                         "INSERT INTO connections(system_id, label, type, address, port, username, password_enc) "
@@ -674,6 +730,5 @@ class MainWindow(QtWidgets.QMainWindow):
     # ==================================================================
 
     def _lock(self) -> None:
-        """Clear key from memory and close — user must re-enter password."""
-        self.key = b"\x00" * 32  # overwrite
+        self.key = b"\x00" * 32
         self.close()

@@ -10,11 +10,13 @@ from PySide6 import QtWidgets
 
 from app.db import init_schema
 from app.ui.main_window import MainWindow
+from app.ui.style import apply as apply_style
 from app.ui.unlock import UnlockDialog
 
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
+    apply_style(app)
     init_schema()
 
     unlock = UnlockDialog()
